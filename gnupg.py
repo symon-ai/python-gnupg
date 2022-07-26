@@ -1032,6 +1032,7 @@ class GPG(object):
     def _read_data(self, stream, result, on_data=None):
         # Read the contents of the file from GPG's stdout
         chunks = []
+        continue_read = True
         while True:
             data = stream.read(1024)
             if len(data) == 0:
@@ -1041,9 +1042,13 @@ class GPG(object):
             logger.debug('chunk: %r' % data[:256])
             append = True
             if on_data:
-                append = on_data(data) is not False
+                _append, _continue_read = on_data(data)
+                append = _append is not False
+                continue_read = _continue_read is not False
             if append:
                 chunks.append(data)
+            if not continue_read:
+                break
         if _py3k:
             # Join using b'' or '', as appropriate
             result.data = type(data)().join(chunks)
