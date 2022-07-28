@@ -125,7 +125,7 @@ def no_quote(s):
     return s
 
 
-def _copy_data(instream, outstream):
+def _copy_data(instream, outstream, on_stop=None):
     # Copy one stream to another
     sent = 0
     if hasattr(sys.stdin, 'encoding'):
@@ -136,7 +136,11 @@ def _copy_data(instream, outstream):
         # See issue #39: read can fail when e.g. a text stream is provided
         # for what is actually a binary file
         try:
-            data = instream.read(1024)
+            if on_stop and on_stop() is True:
+                break
+
+            if instream and not instream.closed:
+                data = instream.read(1024)
         except Exception:  # pragma: no cover
             logger.warning('Exception occurred while reading', exc_info=1)
             break
@@ -145,7 +149,8 @@ def _copy_data(instream, outstream):
         sent += len(data)
         # logger.debug('sending chunk (%d): %r', sent, data[:256])
         try:
-            outstream.write(data)
+            if outstream and not outstream.closed:
+                outstream.write(data)
         except UnicodeError:  # pragma: no cover
             outstream.write(data.encode(enc))
         except Exception:  # pragma: no cover
@@ -154,14 +159,15 @@ def _copy_data(instream, outstream):
             logger.exception('Error sending data')
             break
     try:
-        outstream.close()
+        if outstream and not outstream.closed:
+            outstream.close()
     except IOError:  # pragma: no cover
         logger.warning('Exception occurred while closing: ignored', exc_info=1)
     logger.debug('closed output, %d bytes sent', sent)
 
 
-def _threaded_copy_data(instream, outstream):
-    wr = threading.Thread(target=_copy_data, args=(instream, outstream))
+def _threaded_copy_data(instream, outstream, on_stop):
+    wr = threading.Thread(target=_copy_data, args=(instream, outstream, on_stop))
     wr.daemon = True
     logger.debug('data copier: %r, %r, %r', wr, instream, outstream)
     wr.start()
@@ -927,6 +933,8 @@ class GPG(object):
         # locale.getpreferredencoding falling back to sys.stdin.encoding
         # falling back to utf-8, because gpg itself uses latin-1 as the default
         # encoding.
+        self.io_subprocesses = []
+        self.stop_processing = False
         self.encoding = 'latin-1'
         if gnupghome and not os.path.isdir(self.gnupghome):
             os.makedirs(self.gnupghome, 0o700)
@@ -950,6 +958,9 @@ class GPG(object):
         # See issue #97. It seems gpg allow duplicate keys in keyrings, so we
         # can't be too strict.
         self.check_fingerprint_collisions = False
+
+    def on_stop(self):
+        return self.stop_processing
 
     def make_args(self, args, passphrase):
         """
@@ -1032,7 +1043,7 @@ class GPG(object):
     def _read_data(self, stream, result, on_data=None):
         # Read the contents of the file from GPG's stdout
         chunks = []
-        continue_read = True
+        stop_processing = False
         while True:
             data = stream.read(1024)
             if len(data) == 0:
@@ -1042,12 +1053,15 @@ class GPG(object):
             logger.debug('chunk: %r' % data[:256])
             append = True
             if on_data:
-                _append, _continue_read = on_data(data)
-                append = _append is not False
-                continue_read = _continue_read is not False
+                _app, _sp = on_data(data)
+                append = _app is not False
+                stop_processing = _sp is True
             if append:
                 chunks.append(data)
-            if not continue_read:
+            if stop_processing:
+                if len(self.io_subprocesses) > 0:
+                    for process in self.io_subprocesses:
+                        process.kill()
                 break
         if _py3k:
             # Join using b'' or '', as appropriate
@@ -1115,13 +1129,14 @@ class GPG(object):
         fileobj = self._get_fileobj(fileobj_or_path)
         try:
             p = self._open_subprocess(args, passphrase is not None)
+            self.io_subprocesses.append(p)
             if not binary:  # pragma: no cover
                 stdin = codecs.getwriter(self.encoding)(p.stdin)
             else:
                 stdin = p.stdin
             if passphrase:
                 _write_passphrase(stdin, passphrase, self.encoding)
-            writer = _threaded_copy_data(fileobj, stdin)
+            writer = _threaded_copy_data(fileobj, stdin, self.on_stop)
             self._collect_output(p, result, writer, stdin)
             return result
         finally:
@@ -1192,7 +1207,7 @@ class GPG(object):
             stdin = p.stdin
             if passphrase:
                 _write_passphrase(stdin, passphrase, self.encoding)
-            writer = _threaded_copy_data(fileobj, stdin)
+            writer = _threaded_copy_data(fileobj, stdin, self.on_stop)
         except IOError:  # pragma: no cover
             logging.exception('error writing message')
             writer = None
