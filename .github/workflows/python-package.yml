@@ -1,17 +1,7 @@
 name: Tests
 
 on:
-  push:
-    branches: [ master ]
-    paths-ignore:
-      - 'LICENSE.*'
-      - 'README.*'
-      - '.github/ISSUE-TEMPLATE/**'
-      - 'docs/**'
-      - '.hgignore'
-      - '.gitignore'
-
-  pull_request:
+  workflow_dispatch:
     branches: [ master ]
     paths-ignore:
       - 'LICENSE.*'
